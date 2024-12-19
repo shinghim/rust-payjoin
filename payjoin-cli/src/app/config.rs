@@ -20,6 +20,7 @@ pub struct AppConfig {
 
     // v2 only
     #[cfg(feature = "v2")]
+    #[serde(deserialize_with = "deserialize_ohttp_keys_from_path")]
     pub ohttp_keys: Option<payjoin::OhttpKeys>,
     #[cfg(feature = "v2")]
     pub ohttp_relay: Url,
@@ -101,17 +102,7 @@ impl AppConfig {
                         )?
                         .set_override_option(
                             "ohttp_keys",
-                            matches.get_one::<String>("ohttp_keys").and_then(|s| {
-                                std::fs::read(s)
-                                    .map_err(|e| {
-                                        log::error!("Failed to read ohttp_keys file: {}", e);
-                                        ConfigError::Message(format!(
-                                            "Failed to read ohttp_keys file: {}",
-                                            e
-                                        ))
-                                    })
-                                    .ok()
-                            }),
+                            matches.get_one::<String>("ohttp_keys").map(|s| s.as_str()),
                         )?
                 };
 
@@ -128,10 +119,31 @@ impl AppConfig {
             Some(("resume", _)) => builder,
             _ => unreachable!(), // If all subcommands are defined above, anything else is unreachabe!()
         };
-
         let config = builder.build()?;
         let app_config: AppConfig = config.try_deserialize()?;
         log::debug!("App config: {:?}", app_config);
         Ok(app_config)
+    }
+}
+
+#[cfg(feature = "v2")]
+fn deserialize_ohttp_keys_from_path<'de, D>(
+    deserializer: D,
+) -> Result<Option<payjoin::OhttpKeys>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path_str: Option<String> = Option::deserialize(deserializer)?;
+
+    match path_str {
+        None => Ok(None),
+        Some(path) => std::fs::read(path)
+            .map_err(|e| serde::de::Error::custom(format!("Failed to read ohttp_keys file: {}", e)))
+            .and_then(|bytes| {
+                payjoin::OhttpKeys::decode(&bytes).map_err(|e| {
+                    serde::de::Error::custom(format!("Failed to decode ohttp keys: {}", e))
+                })
+            })
+            .map(Some),
     }
 }
