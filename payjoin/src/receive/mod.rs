@@ -47,14 +47,12 @@ pub struct InputPair {
 }
 
 impl InputPair {
-    pub fn new(txin: TxIn, psbtin: psbt::Input) -> Result<Self, PsbtInputError> {
+    /// Helper function for internally validating inputs and constructing input pairs
+    fn new(txin: TxIn, psbtin: psbt::Input) -> Result<Self, PsbtInputError> {
         let input_pair = Self { txin, psbtin };
         let raw = InternalInputPair::from(&input_pair);
         raw.validate_utxo()?;
-        let address_type = raw.address_type().map_err(InternalPsbtInputError::AddressType)?;
-        if address_type == AddressType::P2sh && input_pair.psbtin.redeem_script.is_none() {
-            return Err(InternalPsbtInputError::NoRedeemScript.into());
-        }
+
         Ok(input_pair)
     }
 
@@ -78,11 +76,7 @@ impl InputPair {
             ..psbt::Input::default()
         };
 
-        let input_pair = Self { txin, psbtin };
-        let raw = InternalInputPair::from(&input_pair);
-        raw.validate_utxo()?;
-
-        Ok(input_pair)
+        Self::new(txin, psbtin)
     }
 
     fn get_txout_for_outpoint(
@@ -151,11 +145,7 @@ impl InputPair {
             witness_script,
             ..psbt::Input::default()
         };
-        let input_pair = Self { txin, psbtin };
-        let raw = InternalInputPair::from(&input_pair);
-        raw.validate_utxo()?;
-
-        Ok(input_pair)
+        Self::new(txin, psbtin)
     }
 
     /// Constructs a new ['InputPair'] for spending a native SegWit P2WPKH output

@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bitcoincore_rpc::json::WalletCreateFundedPsbtOptions;
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use bitcoincore_rpc::{bitcoincore_rpc_json, Auth, Client, RpcApi};
 use payjoin::bitcoin::consensus::encode::{deserialize, serialize_hex};
 use payjoin::bitcoin::consensus::Encodable;
-use payjoin::bitcoin::psbt::{Input, Psbt};
+use payjoin::bitcoin::psbt::Psbt;
 use payjoin::bitcoin::{
-    Address, Amount, Denomination, FeeRate, Network, OutPoint, Script, Transaction, TxIn, TxOut,
-    Txid,
+    Address, AddressType, Amount, Denomination, FeeRate, Network, OutPoint, Script, Transaction,
+    TxOut, Txid,
 };
 use payjoin::receive::InputPair;
 
@@ -145,7 +145,15 @@ impl BitcoindWallet {
             .bitcoind
             .list_unspent(None, None, None, None, None)
             .context("Failed to list unspent")?;
-        Ok(unspent.into_iter().map(input_pair_from_list_unspent).collect())
+
+        unspent
+            .into_iter()
+            .map(|utxo| {
+                let tx = self.bitcoind.get_transaction(&utxo.txid, Some(true))?.transaction()?;
+                input_pair_from_list_unspent(utxo, tx, self.network()?)
+            })
+            .collect::<Result<Vec<InputPair>, _>>()
+            .context("Failed to convert list unspent entry to InputPair")
     }
 
     /// Get the network this wallet is operating on
@@ -158,22 +166,56 @@ impl BitcoindWallet {
 }
 
 pub fn input_pair_from_list_unspent(
-    utxo: bitcoincore_rpc::bitcoincore_rpc_json::ListUnspentResultEntry,
-) -> InputPair {
-    let psbtin = Input {
-        // NOTE: non_witness_utxo is not necessary because bitcoin-cli always supplies
-        // witness_utxo, even for non-witness inputs
-        witness_utxo: Some(TxOut {
-            value: utxo.amount,
-            script_pubkey: utxo.script_pub_key.clone(),
-        }),
-        redeem_script: utxo.redeem_script.clone(),
-        witness_script: utxo.witness_script.clone(),
-        ..Default::default()
-    };
-    let txin = TxIn {
-        previous_output: OutPoint { txid: utxo.txid, vout: utxo.vout },
-        ..Default::default()
-    };
-    InputPair::new(txin, psbtin).expect("Input pair should be valid")
+    utxo: bitcoincore_rpc_json::ListUnspentResultEntry,
+    tx: Transaction,
+    network: Network,
+) -> Result<InputPair> {
+    match Address::from_script(utxo.script_pub_key.as_script(), network)?.address_type().ok_or(
+        anyhow!("Address is unknown, non-standard or related to the future witness version"),
+    )? {
+        AddressType::P2pkh => Ok(InputPair::new_p2pkh(
+            Transaction {
+                version: tx.version,
+                lock_time: tx.lock_time,
+                input: tx.input,
+                output: tx.output,
+            },
+            OutPoint { txid: utxo.txid, vout: utxo.vout },
+            None, // Default sequence
+        )?),
+        AddressType::P2sh => {
+            let redeem_script = utxo.redeem_script.ok_or(anyhow!("Missing redeem script"))?;
+            Ok(InputPair::new_p2sh(
+                Transaction {
+                    version: tx.version,
+                    lock_time: tx.lock_time,
+                    input: tx.input,
+                    output: tx.output,
+                },
+                OutPoint { txid: utxo.txid, vout: utxo.vout },
+                redeem_script,
+                None, // Default sequence
+            )?)
+        }
+        AddressType::P2wpkh => Ok(InputPair::new_p2wpkh(
+            TxOut { value: utxo.amount, script_pubkey: utxo.script_pub_key },
+            OutPoint { txid: utxo.txid, vout: utxo.vout },
+            None,
+        )?),
+        AddressType::P2wsh => {
+            let witness_script = utxo.witness_script.ok_or(anyhow!("Missing witness script"))?;
+            Ok(InputPair::new_p2wsh(
+                TxOut { value: utxo.amount, script_pubkey: utxo.script_pub_key },
+                OutPoint { txid: utxo.txid, vout: utxo.vout },
+                witness_script,
+                None, // Default sequence
+            )?)
+        }
+        AddressType::P2tr => Ok(InputPair::new_p2tr(
+            TxOut { value: utxo.amount, script_pubkey: utxo.script_pub_key },
+            OutPoint { txid: utxo.txid, vout: utxo.vout },
+            None, // Default sequence
+        )?),
+        _ => Err(anyhow!("Unsupported AddressType")), // AddressType is non-exhaustive
+    }
 }
